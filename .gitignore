@@ -1,0 +1,48 @@
+# Build outputs
+target/
+results/
+full-matrix-results/
+
+# Generated parameter files
+params.txt
+
+# CUDA / compiler intermediates
+*.o
+*.obj
+*.a
+*.so
+*.out
+*.ptx
+*.cubin
+*.fatbin
+*.dll
+*.exe
+
+# Logs and run artifacts
+*.log
+*.csv
+*.tsv
+*.trace
+*.dump
+*.prof
+*.jsonl
+
+# Temporary and editor files
+*~
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+
+# Python cache from analysis scripts
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local tuning/output scratch files
+output*.txt
+tmp/
+temp/

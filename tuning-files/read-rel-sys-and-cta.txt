@@ -1,0 +1,5 @@
+read-rel-sys-and-cta 2-loc.txt
+TB_0_1
+HET_C0_G1 HET_C1_G0
+SCOPE_SYSTEM
+DEFAULT

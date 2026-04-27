@@ -1,0 +1,2 @@
+numMemLocations=4
+permuteLocation=1031
