@@ -14,6 +14,7 @@
 # Variables (override on command line):
 #   TESTS=<file>           — tuning list file (default: all-tests.txt)
 #   MEM_BACKEND=<HOSTALLOC|MANAGED|MALLOC>  (default: HOSTALLOC)
+#   make -jN <target>      — compile up to N binaries in parallel
 # =============================================================================
 
 TESTS       ?= all-tests.txt
@@ -39,6 +40,52 @@ all: compile-only
 compile-only: $(TARGET_DIR)
 	@echo "==> Compiling all tests (backend: $(MEM_BACKEND)) ..."
 	@bash -c ' \
+	  detect_jobs() { \
+	    set -- $(MAKEFLAGS); \
+	    prev=""; \
+	    for arg in "$$@"; do \
+	      case "$$arg" in \
+	        -j)      echo 0; return ;; \
+	        -j*)     echo "$${arg#-j}"; return ;; \
+	        --jobs)  echo 0; return ;; \
+	        --jobs=*) echo "$${arg#--jobs=}"; return ;; \
+	        *) \
+	          if [ "$$prev" = "--jobs" ]; then \
+	            echo "$$arg"; \
+	            return; \
+	          fi; \
+	          prev="$$arg"; \
+	          ;; \
+	      esac; \
+	    done; \
+	    echo 1; \
+	  }; \
+	  wait_for_slot() { \
+	    [ "$$job_limit" = "0" ] && return; \
+	    while [ "$$(jobs -pr | wc -l)" -ge "$$job_limit" ]; do \
+	      wait -n || failed=1; \
+	    done; \
+	  }; \
+	  wait_for_all() { \
+	    while [ "$$(jobs -pr | wc -l)" -gt 0 ]; do \
+	      wait -n || failed=1; \
+	    done; \
+	  }; \
+	  compile_one() { \
+	    bin="$$1"; \
+	    test_name="$$2"; \
+	    shift 2; \
+	    defs=(); \
+	    while [ "$$#" -gt 0 ]; do \
+	      defs+=("-D$$1"); \
+	      shift; \
+	    done; \
+	    echo "  Compiling $$bin"; \
+	    "$$NVCC" "$${defs[@]}" -D$$MEM_DEF $$DEBUG_DEF \
+	         -I. -rdc=true -arch $$ARCH \
+	         runner.cu "$$KERNELS_DIR/$$test_name.cu" \
+	         -o "$$bin" 2>&1 || { echo "  FAILED: $$bin"; return 1; }; \
+	  }; \
 	  COMPILE=true; \
 	  MEM_BACKEND_FLAG=$(MEM_BACKEND); \
 	  HET_DEBUG_FLAG=$(HET_DEBUG); \
@@ -47,6 +94,8 @@ compile-only: $(TARGET_DIR)
 	  TARGET_DIR=$(TARGET_DIR); \
 	  KERNELS_DIR=kernels; \
 	  DEBUG_DEF=""; \
+	  job_limit=$$(detect_jobs); \
+	  failed=0; \
 	  if [ "$$HET_DEBUG_FLAG" = "1" ]; then DEBUG_DEF="-DHET_DEBUG=1"; fi; \
 	  case "$$MEM_BACKEND_FLAG" in \
 	    HOSTALLOC) MEM_DEF=MEM_HOSTALLOC ;; \
@@ -73,34 +122,30 @@ compile-only: $(TARGET_DIR)
 	      fence_scopes=($$(sed -n "6p" "$$tuning_file")); \
 	      fence_variants=($$(sed -n "7p" "$$tuning_file")); \
 	    fi; \
-	    for tb in "$${threadblocks[@]}"; do \
-	      for het in "$${het_splits[@]}"; do \
-	        for scope in "$${scopes[@]}"; do \
-	          for variant in "$${variants[@]}"; do \
-	            bin="$$TARGET_DIR/$$test_name-$$tb-$$het-$$scope-NO_FENCE-$$variant-$$MEM_SHORT-runner"; \
-	          echo "  Compiling $$bin"; \
-	          "$$NVCC" -D$$tb -D$$het -D$$scope -D$$variant -D$$MEM_DEF $$DEBUG_DEF \
-	               -I. -rdc=true -arch $$ARCH \
-	               runner.cu "$$KERNELS_DIR/$$test_name.cu" \
-	               -o "$$bin" 2>&1 || echo "  FAILED: $$bin"; \
-	          done; \
-	        if $$has_fences; then \
-	          for f_scope in "$${fence_scopes[@]}"; do \
-	            for f_variant in "$${fence_variants[@]}"; do \
-	              bin="$$TARGET_DIR/$$test_name-$$tb-$$het-$$scope-$$f_scope-$$f_variant-$$MEM_SHORT-runner"; \
-	              echo "  Compiling $$bin"; \
-	              "$$NVCC" -D$$tb -D$$het -D$$scope -D$$f_scope -D$$f_variant -D$$MEM_DEF $$DEBUG_DEF \
-	                   -I. -rdc=true -arch $$ARCH \
-	                   runner.cu "$$KERNELS_DIR/$$test_name.cu" \
-	                   -o "$$bin" 2>&1 || echo "  FAILED: $$bin"; \
+	      for tb in "$${threadblocks[@]}"; do \
+	        for het in "$${het_splits[@]}"; do \
+	          for scope in "$${scopes[@]}"; do \
+	            for variant in "$${variants[@]}"; do \
+	              bin="$$TARGET_DIR/$$test_name-$$tb-$$het-$$scope-NO_FENCE-$$variant-$$MEM_SHORT-runner"; \
+	              compile_one "$$bin" "$$test_name" "$$tb" "$$het" "$$scope" "$$variant" & \
+	              wait_for_slot; \
 	            done; \
-	          done; \
-	        fi; \
+	          if $$has_fences; then \
+	            for f_scope in "$${fence_scopes[@]}"; do \
+	              for f_variant in "$${fence_variants[@]}"; do \
+	                bin="$$TARGET_DIR/$$test_name-$$tb-$$het-$$scope-$$f_scope-$$f_variant-$$MEM_SHORT-runner"; \
+	                compile_one "$$bin" "$$test_name" "$$tb" "$$het" "$$scope" "$$f_scope" "$$f_variant" & \
+	                wait_for_slot; \
+	              done; \
+	            done; \
+	          fi; \
 	        done; \
 	      done; \
 	    done; \
 	  done < $(TESTS); \
+	  wait_for_all; \
 	  echo "==> Compilation complete." \
+	  exit $$failed \
 	'
 
 .PHONY: compile-managed
@@ -160,9 +205,11 @@ help:
 	@echo "  NVCC=<path>         CUDA compiler (default: /usr/local/cuda-12.4/bin/nvcc)"
 	@echo "  ARCH=<arch>         GPU architecture (default: sm_90)"
 	@echo "  HET_DEBUG=1         Compile runners with extra [HET_DEBUG] diagnostics"
+	@echo "  -jN                 Compile up to N binaries in parallel"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make compile-only"
+	@echo "  make -j8 compile-only"
 	@echo "  make compile-only MEM_BACKEND=MANAGED"
 	@echo "  make compile-only HET_DEBUG=1"
 	@echo "  make compile-only TESTS=my-subset.txt"

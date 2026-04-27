@@ -102,6 +102,21 @@ function random_between() {
   echo "$random"
 }
 
+function float_gt() {
+  awk -v lhs="$1" -v rhs="$2" 'BEGIN { exit !(lhs > rhs) }'
+}
+
+function is_tuning_spec_file() {
+  local file=$1
+  local first_line
+  local test_info
+
+  IFS= read -r first_line < "$file" || return 1
+  read -r -a test_info <<< "$first_line"
+
+  [[ ${#test_info[@]} -ge 2 && -f "$PARAMS_DIR/${test_info[1]}" ]]
+}
+
 # =============================================================================
 # Random configuration generator (extended for het)
 # =============================================================================
@@ -120,7 +135,8 @@ function random_config() {
   echo "workgroupSize=$workgroupSize" >> $PARAM_FILE
   echo "shufflePct=$(random_between 0 100)" >> $PARAM_FILE
   echo "barrierPct=$(random_between 0 100)" >> $PARAM_FILE
-  local stressLineSize=$(echo "$(random_between 2 10)^2" | bc)
+  local stressLineBase=$(random_between 2 10)
+  local stressLineSize=$((stressLineBase * stressLineBase))
   echo "stressLineSize=$stressLineSize" >> $PARAM_FILE
   local stressTargetLines=$(random_between 1 16)
   echo "stressTargetLines=$stressTargetLines" >> $PARAM_FILE
@@ -185,7 +201,7 @@ function run_test() {
 
   echo "  $result_key  weak: $weak_behaviors, total: $total_behaviors, rate: $weak_rate/s"
 
-  if (( $(echo "$weak_rate > 0" | bc -l) )); then
+  if float_gt "$weak_rate" 0; then
     local test_result_dir="$RESULT_DIR/$result_key"
     if [ ! -d "$test_result_dir" ]; then
       mkdir -p "$test_result_dir"
@@ -195,7 +211,7 @@ function run_test() {
       echo "$total_behaviors" > "$test_result_dir/total"
     else
       local max_rate=$(cat "$test_result_dir/rate")
-      if (( $(echo "$weak_rate > $max_rate" | bc -l) )); then
+      if float_gt "$weak_rate" "$max_rate"; then
         cp $PARAM_FILE "$test_result_dir"
         echo "$weak_rate" > "$test_result_dir/rate"
         echo "$weak_behaviors" > "$test_result_dir/weak"
@@ -221,7 +237,11 @@ fi
 # Read the list of tuning files
 # =============================================================================
 
-readarray test_files < $tuning_file
+if is_tuning_spec_file "$tuning_file"; then
+  test_files=("$tuning_file")
+else
+  readarray -t test_files < "$tuning_file"
+fi
 
 # =============================================================================
 # Compilation phase
