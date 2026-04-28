@@ -7,27 +7,31 @@ This document describes every litmus test in the framework: thread operations, m
 ## Table of Contents
 
 1. [2-Thread Tests](#2-thread-tests)
-   - [MP — Message Passing](#1-mp--message-passing)
-   - [2+2W — Two Plus Two Writes](#2-22w--two-plus-two-writes)
-   - [Read-Rel-Sys](#3-read-rel-sys)
-   - [Read-Rel-Sys-And-CTA](#4-read-rel-sys-and-cta)
+ - [MP — Message Passing](#1-mp--message-passing)
+   - [SB — Store Buffering](#2-sb--store-buffering)
+   - [LB — Load Buffering](#3-lb--load-buffering)
+   - [Read — Read Visibility Race](#4-read--read-visibility-race)
+   - [Store — Store Visibility Race](#5-store--store-visibility-race)
+   - [2+2W — Two Plus Two Writes](#6-22w--two-plus-two-writes)
+   - [Read-Rel-Sys](#7-read-rel-sys)
+   - [Read-Rel-Sys-And-CTA](#8-read-rel-sys-and-cta)
 2. [3-Thread Tests](#3-thread-tests)
-   - [WRC — Write-Read Causality](#5-wrc--write-read-causality)
-   - [RWC — Read-Write Causality](#6-rwc--read-write-causality)
-   - [WWC — Write-Write Causality](#7-wwc--write-write-causality)
-   - [ISA2 — Instruction Sequence A2](#8-isa2--instruction-sequence-a2)
-   - [Z6.1 — Write Serialization](#9-z61--write-serialization)
-   - [Z6.3 — Write Serialization Variant](#10-z63--write-serialization-variant)
-   - [3.2W — Three Thread Two Writes Each](#11-32w--three-thread-two-writes-each)
-   - [WRW+2W — Write-Read-Write Plus Two Writes](#12-wrw2w--write-read-write-plus-two-writes)
+   - [WRC — Write-Read Causality](#9-wrc--write-read-causality)
+   - [RWC — Read-Write Causality](#10-rwc--read-write-causality)
+   - [WWC — Write-Write Causality](#11-wwc--write-write-causality)
+   - [ISA2 — Instruction Sequence A2](#12-isa2--instruction-sequence-a2)
+   - [Z6.1 — Write Serialization](#13-z61--write-serialization)
+   - [Z6.3 — Write Serialization Variant](#14-z63--write-serialization-variant)
+   - [3.2W — Three Thread Two Writes Each](#15-32w--three-thread-two-writes-each)
+   - [WRW+2W — Write-Read-Write Plus Two Writes](#16-wrw2w--write-read-write-plus-two-writes)
 3. [4-Thread Tests](#4-thread-tests)
-   - [IRIW — Independent Reads of Independent Writes](#13-iriw--independent-reads-of-independent-writes)
-   - [IRIW-SC — IRIW with Sequential Consistency Variants](#14-iriw-sc--iriw-with-sequential-consistency-variants)
-   - [IRIW-Extended](#15-iriw-extended)
-   - [Counterexample — Mixed Scope Test](#16-counterexample--mixed-scope-test)
-   - [Paper Example](#17-paper-example)
-   - [Paper Example 1](#18-paper-example-1)
-   - [Paper Example 2](#19-paper-example-2)
+   - [IRIW — Independent Reads of Independent Writes](#17-iriw--independent-reads-of-independent-writes)
+   - [IRIW-SC — IRIW with Sequential Consistency Variants](#18-iriw-sc--iriw-with-sequential-consistency-variants)
+   - [IRIW-Extended](#19-iriw-extended)
+   - [Counterexample — Mixed Scope Test](#20-counterexample--mixed-scope-test)
+   - [Paper Example](#21-paper-example)
+   - [Paper Example 1](#22-paper-example-1)
+   - [Paper Example 2](#23-paper-example-2)
 4. [Het Split Enumeration](#het-split-enumeration)
 5. [TB Configuration Reference](#tb-configuration-reference)
 
@@ -83,7 +87,107 @@ RELAXED ACQ_REL
 
 ---
 
-### 2. 2+2W — Two Plus Two Writes
+### 2. SB — Store Buffering
+
+**Category**: Bidirectional store buffering
+
+**Memory locations**: 2 (x, y) — uses `2-loc.txt`
+
+**Thread operations**:
+```
+Thread 0:                    Thread 1:
+  store x = 1                  store y = 1
+  r0 = load y                  r1 = load x
+```
+
+**Weak behavior**: `r0 == 0 && r1 == 0` — each side misses the other side's store.
+
+**Variants**: `RELAXED`
+
+**TB configurations**: `TB_0_1`, `TB_01`
+
+**Scopes**: `SCOPE_SYSTEM`, `SCOPE_DEVICE`
+
+**Het splits**: `HET_C0_G1`, `HET_C1_G0`
+
+---
+
+### 3. LB — Load Buffering
+
+**Category**: Bidirectional load buffering
+
+**Memory locations**: 2 (x, y) — uses `2-loc.txt`
+
+**Thread operations**:
+```
+Thread 0:                    Thread 1:
+  r0 = load x                  r1 = load y
+  store y = 1                  store x = 1
+```
+
+**Weak behavior**: `r0 == 1 && r1 == 1` — each side reads the other side's later store.
+
+**Variants**: `RELAXED`
+
+**TB configurations**: `TB_0_1`, `TB_01`
+
+**Scopes**: `SCOPE_SYSTEM`, `SCOPE_DEVICE`
+
+**Het splits**: `HET_C0_G1`, `HET_C1_G0`
+
+---
+
+### 4. Read — Read Visibility Race
+
+**Category**: Read visibility / overwrite race
+
+**Memory locations**: 2 (x, y) — uses `2-loc.txt`
+
+**Thread operations**:
+```
+Thread 0:                    Thread 1:
+  store x = 1                  store y = 2
+  store y = 1                  r0 = load x
+```
+
+**Weak behavior**: `r0 == 0 && y == 2` — Thread 1 overwrites `y` but still misses `x`.
+
+**Variants**: `RELAXED`
+
+**TB configurations**: `TB_0_1`, `TB_01`
+
+**Scopes**: `SCOPE_SYSTEM`, `SCOPE_DEVICE`
+
+**Het splits**: `HET_C0_G1`, `HET_C1_G0`
+
+---
+
+### 5. Store — Store Visibility Race
+
+**Category**: Final-value race after observing a prior write
+
+**Memory locations**: 2 (x, y) — uses `2-loc.txt`
+
+**Thread operations**:
+```
+Thread 0:                    Thread 1:
+  store x = 1                  r0 = load y
+  store y = 1                  store x = 2
+```
+
+**Weak behavior**: `x == 1 && r0 == 1` — Thread 1 sees `y=1` but its later `x=2` does not win the final state.
+
+**Variants**: `RELAXED`
+
+**TB configurations**: `TB_0_1`, `TB_01`
+
+**Scopes**: `SCOPE_SYSTEM`, `SCOPE_DEVICE`
+
+**Het splits**: `HET_C0_G1`, `HET_C1_G0`
+
+---
+
+### 6. 2+2W — Two Plus Two Writes
 
 **Category**: Write coherence cycle
 
@@ -118,7 +222,7 @@ Thread 0:                    Thread 1:
 
 ---
 
-### 3. Read-Rel-Sys
+### 7. Read-Rel-Sys
 
 **Category**: Scope-specific (device scope release vs system visibility)
 
@@ -143,7 +247,7 @@ Thread 0:                    Thread 1:
 
 ---
 
-### 4. Read-Rel-Sys-And-CTA
+### 8. Read-Rel-Sys-And-CTA
 
 **Category**: Scope-specific (device vs CTA scope mismatch)
 
@@ -170,7 +274,7 @@ Thread 0:                          Thread 1:
 
 ## 3-Thread Tests
 
-### 5. WRC — Write-Read Causality
+### 9. WRC — Write-Read Causality
 
 **Category**: Multi-copy atomicity / causality
 
@@ -221,7 +325,7 @@ Thread 0:                    Thread 1:                    Thread 2:
 
 ---
 
-### 6. RWC — Read-Write Causality
+### 10. RWC — Read-Write Causality
 
 **Category**: Multi-copy atomicity / causality
 
@@ -251,7 +355,7 @@ Thread 0:                    Thread 1:                    Thread 2:
 
 ---
 
-### 7. WWC — Write-Write Causality
+### 11. WWC — Write-Write Causality
 
 **Category**: Multi-copy atomicity / write causality
 
@@ -281,7 +385,7 @@ Thread 0:                    Thread 1:                    Thread 2:
 
 ---
 
-### 8. ISA2 — Instruction Sequence A2
+### 12. ISA2 — Instruction Sequence A2
 
 **Category**: Multi-copy atomicity / causality chain
 
@@ -317,7 +421,7 @@ Thread 0:                    Thread 1:                    Thread 2:
 
 ---
 
-### 9. Z6.1 — Write Serialization
+### 13. Z6.1 — Write Serialization
 
 **Category**: Write serialization cycle
 
@@ -345,7 +449,7 @@ Thread 0:                    Thread 1:                    Thread 2:
 
 ---
 
-### 10. Z6.3 — Write Serialization Variant
+### 14. Z6.3 — Write Serialization Variant
 
 **Category**: Write serialization with fences
 
@@ -375,7 +479,7 @@ Thread 0:                    Thread 1:                    Thread 2:
 
 ---
 
-### 11. 3.2W — Three Thread Two Writes Each
+### 15. 3.2W — Three Thread Two Writes Each
 
 **Category**: 3-way write serialization cycle
 

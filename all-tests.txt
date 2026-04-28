@@ -1,4 +1,8 @@
 tuning-files/mp.txt
+tuning-files/sb.txt
+tuning-files/lb.txt
+tuning-files/read.txt
+tuning-files/store.txt
 tuning-files/2+2w.txt
 tuning-files/read-rel-sys.txt
 tuning-files/read-rel-sys-and-cta.txt

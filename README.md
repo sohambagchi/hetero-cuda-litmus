@@ -99,14 +99,16 @@ Flags:
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--mode <compile-and-run|compile-only|run-only>` | Select pipeline mode | `compile-and-run` |
-| `--tests <file>` | Tuning-list file | `all-tests.txt` |
+| `--tests <family[,family...]|family family...>` | Restrict the matrix to one or more test families | `all` |
 | `--mem-backend <HOSTALLOC|MANAGED|MALLOC>` | Memory backend | `MALLOC` |
 | `--nvcc <path>` | CUDA compiler path | `/usr/local/cuda-12.4/bin/nvcc` |
 | `--arch <arch>` | GPU architecture | `sm_90` |
 | `--stress <file>` | Stress parameter file passed to each runner with `-s` | `params-smoke.txt` |
 | `-j`, `--jobs <count>` | Parallel compile workers | `1` |
 | `--out-dir <dir>` | Output directory for logs and CSV summaries | `full-matrix-results/<timestamp>` |
+| `--resume <dir>` | Resume an interrupted matrix run in an existing output directory | unset |
 | `--target-dir <dir>` | Directory containing compiled runners | `target` |
+| `--tests-file <file>` | Tuning-list file used to build the matrix | `all-tests.txt` |
 | `--filter-test <name>` | Restrict the matrix to one test name | unset |
 | `--help` | Print usage |  |
 
@@ -114,6 +116,7 @@ Notes:
 
 - `-j/--jobs` affects compilation only.
 - Execution stays serial so `run.log` remains ordered.
+- `--resume` requires the same matrix configuration and reuses the original `matrix.tsv` plus status files to skip completed entries.
 - `HET_DEBUG` is read from the environment and must be `0` or `1`.
 
 ### `analyze.py`
@@ -177,6 +180,12 @@ Restrict to a single test:
 
 ```bash
 ./run-full-matrix.sh --mode compile-and-run --mem-backend MALLOC --stress params-smoke.txt --filter-test mp -j 4
+```
+
+Restrict to a family set:
+
+```bash
+./run-full-matrix.sh --tests mp,sb,iriw --stress params-smoke.txt
 ```
 
 ### Tune With MALLOC
@@ -276,13 +285,19 @@ Compile only:
 Run only from an existing `target/`:
 
 ```bash
-./run-full-matrix.sh --mode run-only --out-dir full-matrix-results/manual-rerun
+./run-full-matrix.sh --mode run-only --resume full-matrix-results/manual-rerun
 ```
 
 Restrict the sweep to one test:
 
 ```bash
 ./run-full-matrix.sh --filter-test mp --stress params-smoke.txt
+```
+
+Restrict the sweep to several families:
+
+```bash
+./run-full-matrix.sh --mode compile-only --tests sb lb read store
 ```
 
 ### 4. Run The Infinite Tuning Loop
@@ -369,4 +384,5 @@ python3 analyze.py --log tune.log
 - `HOSTALLOC` is the Makefile default memory backend.
 - `MALLOC` is the `run-full-matrix.sh` default memory backend.
 - `make help`, `./run-full-matrix.sh --help`, and `python3 analyze.py --help` reflect the current command-line surface and are the best source for future changes.
+- The 2-thread catalog now includes `sb`, `lb`, `read`, and `store` in addition to `mp` and `2+2w`.
 - For the full test catalog and supported split/topology combinations, see `docs/TEST-CATALOG.md`.

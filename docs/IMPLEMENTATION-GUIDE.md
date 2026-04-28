@@ -865,6 +865,8 @@ This helper script walks `all-tests.txt`, expands every tuning-file combination,
 Key behaviors:
 - defaults to `MEM_MALLOC`, `/usr/local/cuda-12.4/bin/nvcc`, and `sm_90`
 - supports `compile-only`, `run-only`, and combined `compile-and-run` modes
+- `--tests` filters the matrix by one or more test families while `--tests-file` chooses the tuning inventory file
+- `--resume <results-dir>` reuses the saved manifest and status files to continue an interrupted matrix run
 - writes `compile.log`, `run.log`, `compile-summary.csv`, and `run-summary.csv`
 - does not require modifying `tune.sh`
 
