@@ -13,7 +13,7 @@ def parse_args():
     parser.add_argument(
         "csv_file",
         nargs="?",
-        default="full-matrix-results/ismm/results.csv",
+        default="full-matrix-results/ismm-87/results.csv",
         help="Path to ISMM results.csv",
     )
     parser.add_argument(
@@ -39,6 +39,10 @@ def collapse(rows):
             "run_failures": 0,
             "total_behaviors": 0,
             "weak_behaviors": 0,
+            "final_x0y0": 0,
+            "final_x0y1": 0,
+            "final_x1y0": 0,
+            "final_x1y1": 0,
             "runs_with_weak": 0,
             "max_weak_behaviors": 0,
         }
@@ -49,6 +53,10 @@ def collapse(rows):
         status = row["status"]
         total_behaviors = int(row["total_behaviors"] or 0)
         weak_behaviors = int(row["weak_behaviors"] or 0)
+        final_x0y0 = int(row.get("final_x0y0") or 0)
+        final_x0y1 = int(row.get("final_x0y1") or 0)
+        final_x1y0 = int(row.get("final_x1y0") or 0)
+        final_x1y1 = int(row.get("final_x1y1") or 0)
 
         entry = grouped[experiment]
         entry["expected"] = row["expected"]
@@ -58,6 +66,10 @@ def collapse(rows):
             entry["ok_runs"] += 1
             entry["total_behaviors"] += total_behaviors
             entry["weak_behaviors"] += weak_behaviors
+            entry["final_x0y0"] += final_x0y0
+            entry["final_x0y1"] += final_x0y1
+            entry["final_x1y0"] += final_x1y0
+            entry["final_x1y1"] += final_x1y1
             if weak_behaviors > 0:
                 entry["runs_with_weak"] += 1
             if weak_behaviors > entry["max_weak_behaviors"]:
@@ -80,6 +92,10 @@ def collapse(rows):
                 "run_failures": entry["run_failures"],
                 "total_behaviors": total_behaviors,
                 "weak_behaviors": weak_behaviors,
+                "final_x0y0": entry["final_x0y0"],
+                "final_x0y1": entry["final_x0y1"],
+                "final_x1y0": entry["final_x1y0"],
+                "final_x1y1": entry["final_x1y1"],
                 "weak_pct": weak_pct,
                 "runs_with_weak": entry["runs_with_weak"],
                 "hit_rate_pct": hit_rate_pct,
@@ -96,18 +112,23 @@ def print_table(collapsed):
         "ok_runs",
         "weak_behaviors",
         "total_behaviors",
+        "final_x0y0",
+        "final_x0y1",
+        "final_x1y0",
+        "final_x1y1",
         "weak_pct",
         "runs_with_weak",
         "hit_rate_pct",
     )
     print(
-        f"{'experiment':<34} {'expected':<11} {'ok_runs':>7} {'weak':>12} {'total':>12} {'weak_%':>9} {'hit_runs':>10} {'hit_%':>8}"
+        f"{'experiment':<34} {'expected':<11} {'ok_runs':>7} {'weak':>12} {'total':>12} {'x0y0':>10} {'x0y1':>10} {'x1y0':>10} {'x1y1':>10} {'weak_%':>9} {'hit_runs':>10} {'hit_%':>8}"
     )
-    print("-" * 112)
+    print("-" * 154)
     for row in collapsed:
         print(
             f"{row['experiment']:<34} {row['expected']:<11} {row['ok_runs']:>7} "
             f"{row['weak_behaviors']:>12} {row['total_behaviors']:>12} "
+            f"{row['final_x0y0']:>10} {row['final_x0y1']:>10} {row['final_x1y0']:>10} {row['final_x1y1']:>10} "
             f"{row['weak_pct']:>8.4f}% {row['runs_with_weak']:>10} {row['hit_rate_pct']:>7.2f}%"
         )
 
@@ -121,6 +142,10 @@ def write_csv(output_path: Path, collapsed):
         "run_failures",
         "weak_behaviors",
         "total_behaviors",
+        "final_x0y0",
+        "final_x0y1",
+        "final_x1y0",
+        "final_x1y1",
         "weak_pct",
         "runs_with_weak",
         "hit_rate_pct",

@@ -17,6 +17,7 @@ ARCH=${ARCH:-sm_90}
 MEM_BACKEND=${MEM_BACKEND:-MALLOC}
 HET_DEBUG=${HET_DEBUG:-0}
 HOST_ARCH_FLAGS=${HOST_ARCH_FLAGS:--march=armv8.3-a+rcpc}
+RESULT_CSV_HEADER='run_id,cycle,experiment,expected,time_seconds,weak_rate,total_behaviors,weak_behaviors,final_x0y0,final_x0y1,final_x1y0,final_x1y1,status,log_file'
 
 declare -a EXPERIMENTS=(
   "sb-arm-baseline"
@@ -60,7 +61,16 @@ RUNNER_BIN="$TARGET_DIR/ismm-runner-$MEM_SHORT"
 mkdir -p "$RESULT_DIR" "$LOG_DIR" "$TARGET_DIR"
 
 if [ ! -f "$RESULT_CSV" ]; then
-  printf 'run_id,cycle,experiment,expected,time_seconds,weak_rate,total_behaviors,weak_behaviors,status,log_file\n' > "$RESULT_CSV"
+  printf '%s\n' "$RESULT_CSV_HEADER" > "$RESULT_CSV"
+else
+  existing_header=$(sed -n '1p' "$RESULT_CSV")
+  if [ "$existing_header" != "$RESULT_CSV_HEADER" ]; then
+    echo "results.csv schema mismatch: $RESULT_CSV" >&2
+    echo "Expected header: $RESULT_CSV_HEADER" >&2
+    echo "Found header:    $existing_header" >&2
+    echo "Rotate or remove the existing results.csv before running with the new IRIW schema." >&2
+    exit 1
+  fi
 fi
 
 compile_runner() {
@@ -103,7 +113,16 @@ while true; do
     weak_rate=$(printf '%s\n' "$output" | sed -n 's/^Weak behavior rate: //p' | sed 's/ per second$//' | tail -n 1)
     total_behaviors=$(printf '%s\n' "$output" | sed -n 's/^Total behaviors: //p' | tail -n 1)
     weak_behaviors=$(printf '%s\n' "$output" | sed -n 's/^Number of weak behaviors: //p' | tail -n 1)
+    final_x0y0=$(printf '%s\n' "$output" | sed -n 's/^Final state x=0, y=0: //p' | tail -n 1)
+    final_x0y1=$(printf '%s\n' "$output" | sed -n 's/^Final state x=0, y=1: //p' | tail -n 1)
+    final_x1y0=$(printf '%s\n' "$output" | sed -n 's/^Final state x=1, y=0: //p' | tail -n 1)
+    final_x1y1=$(printf '%s\n' "$output" | sed -n 's/^Final state x=1, y=1: //p' | tail -n 1)
     expected=$(printf '%s\n' "$output" | sed -n 's/^Expectation: //p' | tail -n 1)
+
+    final_x0y0=${final_x0y0:-0}
+    final_x0y1=${final_x0y1:-0}
+    final_x1y0=${final_x1y0:-0}
+    final_x1y1=${final_x1y1:-0}
 
     if [ "$status" -eq 0 ]; then
       row_status="ok"
@@ -111,9 +130,10 @@ while true; do
       row_status="run_failed"
     fi
 
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
       "$run_id" "$cycle" "$experiment" "$expected" "$time_seconds" "$weak_rate" \
-      "$total_behaviors" "$weak_behaviors" "$row_status" "$log_file" >> "$RESULT_CSV"
+      "$total_behaviors" "$weak_behaviors" "$final_x0y0" "$final_x0y1" \
+      "$final_x1y0" "$final_x1y1" "$row_status" "$log_file" >> "$RESULT_CSV"
 
     completed_runs=$((completed_runs + 1))
     if [ "$status" -ne 0 ]; then

@@ -337,7 +337,7 @@ store x = 1        release
 
 Thread 1 (ARM):
 ```text
-r0 = load x       acquire
+r0 = load x       rcsc acquire (LDAR)
 r1 = load y       relaxed
 ```
 
@@ -348,7 +348,7 @@ store y = 1        release
 
 Thread 3 (ARM):
 ```text
-r2 = load y       acquire
+r2 = load y       rcsc acquire (LDAR)
 r3 = load x       relaxed
 ```
 
@@ -382,5 +382,7 @@ r3 = load x       relaxed
 
 - `ismm.sh` loops over exactly these experiment names in order.
 - The runner classifies only the single weak outcome listed above for each test family.
+- For IRIW, the runner also reports the final-state counts for `x=0,y=0`, `x=0,y=1`, `x=1,y=0`, and `x=1,y=1`.
+- For IRIW, `Total behaviors` counts only the `x=1 && y=1` final-state bucket.
 - The `expected` field in `results.csv` is copied directly from the experiment table in `ismm_runner.cu`.
 - This document reflects the current implementation, not a broader intended theory space.

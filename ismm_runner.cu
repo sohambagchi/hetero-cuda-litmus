@@ -1,5 +1,8 @@
 // ismm_runner.cu — targeted ISMM runner for SB and IRIW
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <getopt.h>
@@ -57,6 +60,9 @@ struct StressParams {
   int barrierSpinLimit;
 };
 
+constexpr int kMaxThreads = 4;
+constexpr int kMaxThreadOps = 2;
+
 enum TestKind {
   TEST_SB = 0,
   TEST_IRIW = 1,
@@ -72,54 +78,50 @@ enum GpuScopeKind {
   GPU_SCOPE_DEVICE = 1,
 };
 
-enum CpuStoreKind {
-  CPU_STORE_NONE = 0,
-  CPU_STORE_RELAXED = 1,
-  CPU_STORE_RELEASE = 2,
+enum ThreadOpKind {
+  THREAD_OP_NONE = 0,
+  THREAD_OP_STORE = 1,
+  THREAD_OP_LOAD = 2,
 };
 
-enum CpuLoadKind {
-  CPU_LOAD_NONE = 0,
-  CPU_LOAD_RELAXED = 1,
-  CPU_LOAD_ACQUIRE = 2,
-  CPU_LOAD_RCSC = 3,
-  CPU_LOAD_RCPC = 4,
+enum LocationKind {
+  LOC_X = 0,
+  LOC_Y = 1,
 };
 
-enum GpuStoreKind {
-  GPU_STORE_NONE = 0,
-  GPU_STORE_RELAXED = 1,
-  GPU_STORE_RELEASE = 2,
+enum MemOrderKind {
+  MEM_ORDER_RELAXED = 0,
+  MEM_ORDER_RELEASE = 1,
+  MEM_ORDER_ACQUIRE = 2,
+  MEM_ORDER_RCSC = 3,
+  MEM_ORDER_RCPC = 4,
 };
 
-enum GpuLoadKind {
-  GPU_LOAD_NONE = 0,
-  GPU_LOAD_RELAXED = 1,
-  GPU_LOAD_ACQUIRE = 2,
+struct ThreadOp {
+  ThreadOpKind kind;
+  LocationKind location;
+  MemOrderKind order;
+  int resultSlot;
 };
 
-struct RoleConfig {
-  int domain;
-  int gpuScope;
-  int cpuStore;
-  int cpuLoad1;
-  int cpuLoad2;
-  int gpuStore;
-  int gpuLoad1;
-  int gpuLoad2;
+struct ThreadProgram {
+  DomainKind domain;
+  GpuScopeKind gpuScope;
+  int opCount;
+  ThreadOp ops[kMaxThreadOps];
 };
 
 struct ExperimentConfig {
   const char* name;
   const char* expectation;
-  int testKind;
-  int roleCount;
-  RoleConfig roles[4];
+  TestKind testKind;
+  int threadCount;
+  ThreadProgram threads[kMaxThreads];
 };
 
 struct RunConfig {
-  int testKind;
-  int roleCount;
+  TestKind testKind;
+  int threadCount;
   int totalInstances;
   int memStride;
   int memOffset;
@@ -128,95 +130,49 @@ struct RunConfig {
   int gpuPreStress;
   int gpuPreStressIterations;
   int gpuPreStressPattern;
-  RoleConfig roles[4];
+  ThreadProgram threads[kMaxThreads];
 };
 
 struct IterationCounts {
   int weak = 0;
   int total = 0;
   int other = 0;
-  int na = 0;
+  int x0y0 = 0;
+  int x0y1 = 0;
+  int x1y0 = 0;
+  int x1y1 = 0;
 };
 
-static constexpr RoleConfig CPU_RELAXED_SB = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_RELAXED, CPU_LOAD_RELAXED, CPU_LOAD_NONE,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
+constexpr ThreadOp kNoOp = {THREAD_OP_NONE, LOC_X, MEM_ORDER_RELAXED, -1};
+constexpr ThreadProgram kNoThread = {DOMAIN_CPU, GPU_SCOPE_SYSTEM, 0, {kNoOp, kNoOp}};
 
-static constexpr RoleConfig CPU_RELEASE_RCSC_SB = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_RELEASE, CPU_LOAD_RCSC, CPU_LOAD_NONE,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
+constexpr ThreadOp Store(LocationKind location, MemOrderKind order) {
+  return {THREAD_OP_STORE, location, order, -1};
+}
 
-static constexpr RoleConfig CPU_RELEASE_RCPC_SB = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_RELEASE, CPU_LOAD_RCPC, CPU_LOAD_NONE,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
+constexpr ThreadOp Load(LocationKind location, MemOrderKind order, int resultSlot) {
+  return {THREAD_OP_LOAD, location, order, resultSlot};
+}
 
-static constexpr RoleConfig GPU_RELAXED_SYSTEM_SB = {
-  DOMAIN_GPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_RELAXED, GPU_LOAD_RELAXED, GPU_LOAD_NONE,
-};
+constexpr ThreadProgram CpuThread(ThreadOp op0) {
+  return {DOMAIN_CPU, GPU_SCOPE_SYSTEM, 1, {op0, kNoOp}};
+}
 
-static constexpr RoleConfig GPU_RELEASE_ACQUIRE_SYSTEM_SB = {
-  DOMAIN_GPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_RELEASE, GPU_LOAD_ACQUIRE, GPU_LOAD_NONE,
-};
+constexpr ThreadProgram CpuThread(ThreadOp op0, ThreadOp op1) {
+  return {DOMAIN_CPU, GPU_SCOPE_SYSTEM, 2, {op0, op1}};
+}
 
-static constexpr RoleConfig GPU_RELEASE_ACQUIRE_DEVICE_SB = {
-  DOMAIN_GPU, GPU_SCOPE_DEVICE, CPU_STORE_NONE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_RELEASE, GPU_LOAD_ACQUIRE, GPU_LOAD_NONE,
-};
+constexpr ThreadProgram GpuSystemThread(ThreadOp op0) {
+  return {DOMAIN_GPU, GPU_SCOPE_SYSTEM, 1, {op0, kNoOp}};
+}
 
-static constexpr RoleConfig CPU_RELAXED_IRIW_WRITER = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_RELAXED, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
+constexpr ThreadProgram GpuSystemThread(ThreadOp op0, ThreadOp op1) {
+  return {DOMAIN_GPU, GPU_SCOPE_SYSTEM, 2, {op0, op1}};
+}
 
-static constexpr RoleConfig CPU_RELEASE_IRIW_WRITER = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_RELEASE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
-
-static constexpr RoleConfig CPU_RELAXED_IRIW_READER = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_RELAXED, CPU_LOAD_RELAXED,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
-
-static constexpr RoleConfig CPU_RCSC_IRIW_READER = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_RCSC, CPU_LOAD_RELAXED,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
-
-static constexpr RoleConfig CPU_RCPC_IRIW_READER = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_RCPC, CPU_LOAD_RELAXED,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
-
-static constexpr RoleConfig CPU_ACQUIRE_IRIW_READER = {
-  DOMAIN_CPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_ACQUIRE, CPU_LOAD_RELAXED,
-  GPU_STORE_NONE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
-
-static constexpr RoleConfig GPU_RELAXED_SYSTEM_IRIW_WRITER = {
-  DOMAIN_GPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_RELAXED, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
-
-static constexpr RoleConfig GPU_RELEASE_SYSTEM_IRIW_WRITER = {
-  DOMAIN_GPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_RELEASE, GPU_LOAD_NONE, GPU_LOAD_NONE,
-};
-
-static constexpr RoleConfig GPU_RELAXED_SYSTEM_IRIW_READER = {
-  DOMAIN_GPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_NONE, GPU_LOAD_RELAXED, GPU_LOAD_RELAXED,
-};
-
-static constexpr RoleConfig GPU_ACQUIRE_SYSTEM_IRIW_READER = {
-  DOMAIN_GPU, GPU_SCOPE_SYSTEM, CPU_STORE_NONE, CPU_LOAD_NONE, CPU_LOAD_NONE,
-  GPU_STORE_NONE, GPU_LOAD_ACQUIRE, GPU_LOAD_RELAXED,
-};
+constexpr ThreadProgram GpuDeviceThread(ThreadOp op0, ThreadOp op1) {
+  return {DOMAIN_GPU, GPU_SCOPE_DEVICE, 2, {op0, op1}};
+}
 
 static constexpr ExperimentConfig kExperiments[] = {
   {
@@ -224,56 +180,96 @@ static constexpr ExperimentConfig kExperiments[] = {
     "allowed",
     TEST_SB,
     2,
-    {CPU_RELAXED_SB, CPU_RELAXED_SB, {}, {}},
+    {
+      CpuThread(Store(LOC_X, MEM_ORDER_RELAXED), Load(LOC_Y, MEM_ORDER_RELAXED, 0)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELAXED), Load(LOC_X, MEM_ORDER_RELAXED, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "sb-ptx-baseline",
     "allowed",
     TEST_SB,
     2,
-    {GPU_RELAXED_SYSTEM_SB, GPU_RELAXED_SYSTEM_SB, {}, {}},
+    {
+      GpuSystemThread(Store(LOC_X, MEM_ORDER_RELAXED), Load(LOC_Y, MEM_ORDER_RELAXED, 0)),
+      GpuSystemThread(Store(LOC_Y, MEM_ORDER_RELAXED), Load(LOC_X, MEM_ORDER_RELAXED, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "sb-arm-rel-acq-rcsc",
     "disallowed",
     TEST_SB,
     2,
-    {CPU_RELEASE_RCSC_SB, CPU_RELEASE_RCSC_SB, {}, {}},
+    {
+      CpuThread(Store(LOC_X, MEM_ORDER_RELEASE), Load(LOC_Y, MEM_ORDER_RCSC, 0)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELEASE), Load(LOC_X, MEM_ORDER_RCSC, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "sb-arm-rel-acq-rcpc",
     "allowed",
     TEST_SB,
     2,
-    {CPU_RELEASE_RCPC_SB, CPU_RELEASE_RCPC_SB, {}, {}},
+    {
+      CpuThread(Store(LOC_X, MEM_ORDER_RELEASE), Load(LOC_Y, MEM_ORDER_RCPC, 0)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELEASE), Load(LOC_X, MEM_ORDER_RCPC, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "sb-ptx-rel-acq-system",
     "allowed",
     TEST_SB,
     2,
-    {GPU_RELEASE_ACQUIRE_SYSTEM_SB, GPU_RELEASE_ACQUIRE_SYSTEM_SB, {}, {}},
+    {
+      GpuSystemThread(Store(LOC_X, MEM_ORDER_RELEASE), Load(LOC_Y, MEM_ORDER_ACQUIRE, 0)),
+      GpuSystemThread(Store(LOC_Y, MEM_ORDER_RELEASE), Load(LOC_X, MEM_ORDER_ACQUIRE, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "sb-ptx-rel-acq-device",
     "requested",
     TEST_SB,
     2,
-    {GPU_RELEASE_ACQUIRE_DEVICE_SB, GPU_RELEASE_ACQUIRE_DEVICE_SB, {}, {}},
+    {
+      GpuDeviceThread(Store(LOC_X, MEM_ORDER_RELEASE), Load(LOC_Y, MEM_ORDER_ACQUIRE, 0)),
+      GpuDeviceThread(Store(LOC_Y, MEM_ORDER_RELEASE), Load(LOC_X, MEM_ORDER_ACQUIRE, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "sb-mixed-arm-ptx-t0-arm",
     "allowed",
     TEST_SB,
     2,
-    {CPU_RELEASE_RCSC_SB, GPU_RELEASE_ACQUIRE_SYSTEM_SB, {}, {}},
+    {
+      CpuThread(Store(LOC_X, MEM_ORDER_RELEASE), Load(LOC_Y, MEM_ORDER_RCSC, 0)),
+      GpuSystemThread(Store(LOC_Y, MEM_ORDER_RELEASE), Load(LOC_X, MEM_ORDER_ACQUIRE, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "sb-mixed-arm-ptx-t0-ptx",
     "allowed",
     TEST_SB,
     2,
-    {GPU_RELEASE_ACQUIRE_SYSTEM_SB, CPU_RELEASE_RCSC_SB, {}, {}},
+    {
+      GpuSystemThread(Store(LOC_X, MEM_ORDER_RELEASE), Load(LOC_Y, MEM_ORDER_ACQUIRE, 0)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELEASE), Load(LOC_X, MEM_ORDER_RCSC, 1)),
+      kNoThread,
+      kNoThread,
+    },
   },
   {
     "iriw-arm-baseline",
@@ -281,10 +277,10 @@ static constexpr ExperimentConfig kExperiments[] = {
     TEST_IRIW,
     4,
     {
-      CPU_RELAXED_IRIW_WRITER,
-      CPU_RELAXED_IRIW_READER,
-      CPU_RELAXED_IRIW_WRITER,
-      CPU_RELAXED_IRIW_READER,
+      CpuThread(Store(LOC_X, MEM_ORDER_RELAXED)),
+      CpuThread(Load(LOC_X, MEM_ORDER_RELAXED, 0), Load(LOC_Y, MEM_ORDER_RELAXED, 1)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELAXED)),
+      CpuThread(Load(LOC_Y, MEM_ORDER_RELAXED, 2), Load(LOC_X, MEM_ORDER_RELAXED, 3)),
     },
   },
   {
@@ -293,10 +289,10 @@ static constexpr ExperimentConfig kExperiments[] = {
     TEST_IRIW,
     4,
     {
-      GPU_RELAXED_SYSTEM_IRIW_WRITER,
-      GPU_RELAXED_SYSTEM_IRIW_READER,
-      GPU_RELAXED_SYSTEM_IRIW_WRITER,
-      GPU_RELAXED_SYSTEM_IRIW_READER,
+      GpuSystemThread(Store(LOC_X, MEM_ORDER_RELAXED)),
+      GpuSystemThread(Load(LOC_X, MEM_ORDER_RELAXED, 0), Load(LOC_Y, MEM_ORDER_RELAXED, 1)),
+      GpuSystemThread(Store(LOC_Y, MEM_ORDER_RELAXED)),
+      GpuSystemThread(Load(LOC_Y, MEM_ORDER_RELAXED, 2), Load(LOC_X, MEM_ORDER_RELAXED, 3)),
     },
   },
   {
@@ -305,10 +301,10 @@ static constexpr ExperimentConfig kExperiments[] = {
     TEST_IRIW,
     4,
     {
-      CPU_RELEASE_IRIW_WRITER,
-      CPU_RCSC_IRIW_READER,
-      CPU_RELEASE_IRIW_WRITER,
-      CPU_RCSC_IRIW_READER,
+      CpuThread(Store(LOC_X, MEM_ORDER_RELEASE)),
+      CpuThread(Load(LOC_X, MEM_ORDER_RCSC, 0), Load(LOC_Y, MEM_ORDER_RELAXED, 1)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELEASE)),
+      CpuThread(Load(LOC_Y, MEM_ORDER_RCSC, 2), Load(LOC_X, MEM_ORDER_RELAXED, 3)),
     },
   },
   {
@@ -317,10 +313,10 @@ static constexpr ExperimentConfig kExperiments[] = {
     TEST_IRIW,
     4,
     {
-      CPU_RELEASE_IRIW_WRITER,
-      CPU_RCPC_IRIW_READER,
-      CPU_RELEASE_IRIW_WRITER,
-      CPU_RCPC_IRIW_READER,
+      CpuThread(Store(LOC_X, MEM_ORDER_RELEASE)),
+      CpuThread(Load(LOC_X, MEM_ORDER_RCPC, 0), Load(LOC_Y, MEM_ORDER_RELAXED, 1)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELEASE)),
+      CpuThread(Load(LOC_Y, MEM_ORDER_RCPC, 2), Load(LOC_X, MEM_ORDER_RELAXED, 3)),
     },
   },
   {
@@ -329,10 +325,10 @@ static constexpr ExperimentConfig kExperiments[] = {
     TEST_IRIW,
     4,
     {
-      GPU_RELEASE_SYSTEM_IRIW_WRITER,
-      GPU_ACQUIRE_SYSTEM_IRIW_READER,
-      GPU_RELEASE_SYSTEM_IRIW_WRITER,
-      GPU_ACQUIRE_SYSTEM_IRIW_READER,
+      GpuSystemThread(Store(LOC_X, MEM_ORDER_RELEASE)),
+      GpuSystemThread(Load(LOC_X, MEM_ORDER_ACQUIRE, 0), Load(LOC_Y, MEM_ORDER_RELAXED, 1)),
+      GpuSystemThread(Store(LOC_Y, MEM_ORDER_RELEASE)),
+      GpuSystemThread(Load(LOC_Y, MEM_ORDER_ACQUIRE, 2), Load(LOC_X, MEM_ORDER_RELAXED, 3)),
     },
   },
   {
@@ -341,10 +337,10 @@ static constexpr ExperimentConfig kExperiments[] = {
     TEST_IRIW,
     4,
     {
-      GPU_RELEASE_SYSTEM_IRIW_WRITER,
-      CPU_ACQUIRE_IRIW_READER,
-      GPU_RELEASE_SYSTEM_IRIW_WRITER,
-      CPU_ACQUIRE_IRIW_READER,
+      GpuSystemThread(Store(LOC_X, MEM_ORDER_RELEASE)),
+      CpuThread(Load(LOC_X, MEM_ORDER_RCSC, 0), Load(LOC_Y, MEM_ORDER_RELAXED, 1)),
+      GpuSystemThread(Store(LOC_Y, MEM_ORDER_RELEASE)),
+      CpuThread(Load(LOC_Y, MEM_ORDER_RCSC, 2), Load(LOC_X, MEM_ORDER_RELAXED, 3)),
     },
   },
   {
@@ -353,15 +349,15 @@ static constexpr ExperimentConfig kExperiments[] = {
     TEST_IRIW,
     4,
     {
-      CPU_RELEASE_IRIW_WRITER,
-      GPU_ACQUIRE_SYSTEM_IRIW_READER,
-      CPU_RELEASE_IRIW_WRITER,
-      GPU_ACQUIRE_SYSTEM_IRIW_READER,
+      CpuThread(Store(LOC_X, MEM_ORDER_RELEASE)),
+      GpuSystemThread(Load(LOC_X, MEM_ORDER_ACQUIRE, 0), Load(LOC_Y, MEM_ORDER_RELAXED, 1)),
+      CpuThread(Store(LOC_Y, MEM_ORDER_RELEASE)),
+      GpuSystemThread(Load(LOC_Y, MEM_ORDER_ACQUIRE, 2), Load(LOC_X, MEM_ORDER_RELAXED, 3)),
     },
   },
 };
 
-constexpr int kExperimentCount = sizeof(kExperiments) / sizeof(kExperiments[0]);
+constexpr int kExperimentCount = static_cast<int>(sizeof(kExperiments) / sizeof(kExperiments[0]));
 
 int random_between(int min, int max) {
   if (min >= max) {
@@ -482,12 +478,40 @@ __host__ __device__ inline uint y_addr_for_host_device(int instance, int totalIn
 #endif
 }
 
-inline void cpu_store_value(het_atomic_uint* location, int storeKind, uint value) {
-  switch (storeKind) {
-    case CPU_STORE_RELAXED:
+__host__ __device__ inline uint location_addr_for(LocationKind location, int instance,
+                                                  int totalInstances, int memStride,
+                                                  int memOffset, int permuteLocation) {
+  if (location == LOC_X) {
+    return x_addr_for(instance, memStride);
+  }
+  return y_addr_for_host_device(instance, totalInstances, memStride, memOffset, permuteLocation);
+}
+
+__host__ __device__ inline void write_result_slot(ReadResults* result, int slot, uint value) {
+  switch (slot) {
+    case 0:
+      result->r0 = value;
+      break;
+    case 1:
+      result->r1 = value;
+      break;
+    case 2:
+      result->r2 = value;
+      break;
+    case 3:
+      result->r3 = value;
+      break;
+    default:
+      break;
+  }
+}
+
+inline void cpu_store_value(het_atomic_uint* location, MemOrderKind order, uint value) {
+  switch (order) {
+    case MEM_ORDER_RELAXED:
       location->ref<cuda::thread_scope_system>().store(value, cuda::memory_order_relaxed);
       break;
-    case CPU_STORE_RELEASE:
+    case MEM_ORDER_RELEASE:
 #if defined(__aarch64__)
       asm volatile("stlr %w1, [%0]" :: "r"(&location->raw()), "r"(value) : "memory");
 #else
@@ -499,13 +523,13 @@ inline void cpu_store_value(het_atomic_uint* location, int storeKind, uint value
   }
 }
 
-inline uint cpu_load_value(const het_atomic_uint* location, int loadKind) {
-  switch (loadKind) {
-    case CPU_LOAD_RELAXED:
+inline uint cpu_load_value(const het_atomic_uint* location, MemOrderKind order) {
+  switch (order) {
+    case MEM_ORDER_RELAXED:
       return location->ref<cuda::thread_scope_system>().load(cuda::memory_order_relaxed);
-    case CPU_LOAD_ACQUIRE:
+    case MEM_ORDER_ACQUIRE:
       return location->ref<cuda::thread_scope_system>().load(cuda::memory_order_acquire);
-    case CPU_LOAD_RCSC: {
+    case MEM_ORDER_RCSC: {
 #if defined(__aarch64__)
       uint value;
       asm volatile("ldar %w0, [%1]" : "=r"(value) : "r"(&location->raw()) : "memory");
@@ -514,7 +538,7 @@ inline uint cpu_load_value(const het_atomic_uint* location, int loadKind) {
       return location->ref<cuda::thread_scope_system>().load(cuda::memory_order_acquire);
 #endif
     }
-    case CPU_LOAD_RCPC: {
+    case MEM_ORDER_RCPC: {
 #if defined(__aarch64__)
       uint value;
       asm volatile("ldapr %w0, [%1]" : "=r"(value) : "r"(&location->raw()) : "memory");
@@ -529,50 +553,61 @@ inline uint cpu_load_value(const het_atomic_uint* location, int loadKind) {
 }
 
 template <cuda::thread_scope Scope>
-__device__ inline void gpu_store_scoped(het_atomic_uint* location, uint value, int storeKind) {
+__device__ inline void gpu_store_scoped(het_atomic_uint* location, uint value, MemOrderKind orderKind) {
   cuda::memory_order order = cuda::memory_order_relaxed;
-  if (storeKind == GPU_STORE_RELEASE) {
-    order = cuda::memory_order_release;
+  switch (orderKind) {
+    case MEM_ORDER_RELEASE:
+      order = cuda::memory_order_release;
+      break;
+    case MEM_ORDER_RELAXED:
+      break;
+    default:
+      break;
   }
-  if (storeKind != GPU_STORE_NONE) {
-    location->ref<Scope>().store(value, order);
-  }
+  location->ref<Scope>().store(value, order);
 }
 
 template <cuda::thread_scope Scope>
-__device__ inline uint gpu_load_scoped(const het_atomic_uint* location, int loadKind) {
+__device__ inline uint gpu_load_scoped(const het_atomic_uint* location, MemOrderKind orderKind) {
   cuda::memory_order order = cuda::memory_order_relaxed;
-  if (loadKind == GPU_LOAD_ACQUIRE) {
-    order = cuda::memory_order_acquire;
+  switch (orderKind) {
+    case MEM_ORDER_ACQUIRE:
+      order = cuda::memory_order_acquire;
+      break;
+    case MEM_ORDER_RELAXED:
+      break;
+    default:
+      break;
   }
   return location->ref<Scope>().load(order);
 }
 
-__device__ inline void gpu_store_value(het_atomic_uint* location, const RoleConfig& role, uint value) {
-  if (role.gpuScope == GPU_SCOPE_DEVICE) {
-    gpu_store_scoped<cuda::thread_scope_device>(location, value, role.gpuStore);
+__device__ inline void gpu_store_value(het_atomic_uint* location, const ThreadProgram& thread,
+                                       MemOrderKind order, uint value) {
+  if (thread.gpuScope == GPU_SCOPE_DEVICE) {
+    gpu_store_scoped<cuda::thread_scope_device>(location, value, order);
   } else {
-    gpu_store_scoped<cuda::thread_scope_system>(location, value, role.gpuStore);
+    gpu_store_scoped<cuda::thread_scope_system>(location, value, order);
   }
 }
 
-__device__ inline uint gpu_load_value(const het_atomic_uint* location, const RoleConfig& role, int whichLoad) {
-  int loadKind = (whichLoad == 0) ? role.gpuLoad1 : role.gpuLoad2;
-  if (role.gpuScope == GPU_SCOPE_DEVICE) {
-    return gpu_load_scoped<cuda::thread_scope_device>(location, loadKind);
+__device__ inline uint gpu_load_value(const het_atomic_uint* location, const ThreadProgram& thread,
+                                      MemOrderKind order) {
+  if (thread.gpuScope == GPU_SCOPE_DEVICE) {
+    return gpu_load_scoped<cuda::thread_scope_device>(location, order);
   }
-  return gpu_load_scoped<cuda::thread_scope_system>(location, loadKind);
+  return gpu_load_scoped<cuda::thread_scope_system>(location, order);
 }
 
-__device__ void execute_gpu_role(int roleIndex, int instance,
-                                 het_atomic_uint* testLocations,
-                                 ReadResults* readResults,
-                                 het_barrier_t* barriers,
-                                 uint* scratchpad,
-                                 uint* scratchLocations,
-                                 const RunConfig config) {
-  const RoleConfig role = config.roles[roleIndex];
-  if (role.domain != DOMAIN_GPU) {
+__device__ void execute_gpu_thread(int threadIndex, int instance,
+                                   het_atomic_uint* testLocations,
+                                   ReadResults* readResults,
+                                   het_barrier_t* barriers,
+                                   uint* scratchpad,
+                                   uint* scratchLocations,
+                                   const RunConfig& config) {
+  const ThreadProgram& thread = config.threads[threadIndex];
+  if (thread.domain != DOMAIN_GPU) {
     return;
   }
 
@@ -580,36 +615,24 @@ __device__ void execute_gpu_role(int roleIndex, int instance,
     do_stress(scratchpad, scratchLocations, config.gpuPreStressIterations, config.gpuPreStressPattern);
   }
 
-  het_spin(&barriers[instance], config.roleCount, config.barrierSpinLimit);
+  het_spin(&barriers[instance], config.threadCount, config.barrierSpinLimit);
 
-  uint xAddr = x_addr_for(instance, config.memStride);
-  uint yAddr = y_addr_for_host_device(instance, config.totalInstances, config.memStride,
-                                      config.memOffset, config.permuteLocation);
-
-  if (config.testKind == TEST_SB) {
-    if (roleIndex == 0) {
-      gpu_store_value(&testLocations[xAddr], role, 1);
-      readResults[instance].r0 = gpu_load_value(&testLocations[yAddr], role, 0);
-      cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
-    } else {
-      gpu_store_value(&testLocations[yAddr], role, 1);
-      readResults[instance].r1 = gpu_load_value(&testLocations[xAddr], role, 0);
-      cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
+  bool didLoad = false;
+  for (int opIndex = 0; opIndex < thread.opCount; opIndex++) {
+    const ThreadOp& op = thread.ops[opIndex];
+    uint addr = location_addr_for(op.location, instance, config.totalInstances,
+                                  config.memStride, config.memOffset,
+                                  config.permuteLocation);
+    if (op.kind == THREAD_OP_STORE) {
+      gpu_store_value(&testLocations[addr], thread, op.order, 1);
+    } else if (op.kind == THREAD_OP_LOAD) {
+      uint value = gpu_load_value(&testLocations[addr], thread, op.order);
+      write_result_slot(&readResults[instance], op.resultSlot, value);
+      didLoad = true;
     }
-    return;
   }
 
-  if (roleIndex == 0) {
-    gpu_store_value(&testLocations[xAddr], role, 1);
-  } else if (roleIndex == 1) {
-    readResults[instance].r0 = gpu_load_value(&testLocations[xAddr], role, 0);
-    readResults[instance].r1 = gpu_load_value(&testLocations[yAddr], role, 1);
-    cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
-  } else if (roleIndex == 2) {
-    gpu_store_value(&testLocations[yAddr], role, 1);
-  } else {
-    readResults[instance].r2 = gpu_load_value(&testLocations[yAddr], role, 0);
-    readResults[instance].r3 = gpu_load_value(&testLocations[xAddr], role, 1);
+  if (didLoad) {
     cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
   }
 }
@@ -621,15 +644,15 @@ __global__ void gpu_role_kernel(het_atomic_uint* testLocations,
                                 uint* scratchLocations,
                                 RunConfig config) {
   int taskIndex = blockIdx.x * blockDim.x + threadIdx.x;
-  int taskCount = config.totalInstances * config.roleCount;
+  int taskCount = config.totalInstances * config.threadCount;
   if (taskIndex >= taskCount) {
     return;
   }
 
-  int instance = taskIndex / config.roleCount;
-  int roleIndex = taskIndex % config.roleCount;
-  execute_gpu_role(roleIndex, instance, testLocations, readResults, barriers,
-                   scratchpad, scratchLocations, config);
+  int instance = taskIndex / config.threadCount;
+  int threadIndex = taskIndex % config.threadCount;
+  execute_gpu_thread(threadIndex, instance, testLocations, readResults, barriers,
+                     scratchpad, scratchLocations, config);
 }
 
 struct CpuWorkerContext {
@@ -641,54 +664,42 @@ struct CpuWorkerContext {
   bool doPreStress;
   int preStressIterations;
   int preStressPattern;
-  int roleIndex;
+  int threadIndex;
   int workerIndex;
   int workerCount;
 };
 
-void execute_cpu_role(const CpuWorkerContext& ctx, int instance) {
-  const RoleConfig& role = ctx.config->roles[ctx.roleIndex];
-  uint xAddr = x_addr_for(instance, ctx.config->memStride);
-  uint yAddr = y_addr_for_host_device(instance, ctx.config->totalInstances, ctx.config->memStride,
-                                      ctx.config->memOffset, ctx.config->permuteLocation);
-
+void execute_cpu_thread(const CpuWorkerContext& ctx, int instance) {
+  const ThreadProgram& thread = ctx.config->threads[ctx.threadIndex];
   if (ctx.doPreStress) {
     cpu_do_stress(ctx.scratchpad, ctx.preStressIterations, ctx.preStressPattern);
   }
 
-  cpu_het_spin(&ctx.barriers[instance], ctx.config->roleCount, ctx.config->barrierSpinLimit);
+  cpu_het_spin(&ctx.barriers[instance], ctx.config->threadCount, ctx.config->barrierSpinLimit);
 
-  if (ctx.config->testKind == TEST_SB) {
-    if (ctx.roleIndex == 0) {
-      cpu_store_value(&ctx.testLocations[xAddr], role.cpuStore, 1);
-      ctx.readResults[instance].r0 = cpu_load_value(&ctx.testLocations[yAddr], role.cpuLoad1);
-      cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
-    } else {
-      cpu_store_value(&ctx.testLocations[yAddr], role.cpuStore, 1);
-      ctx.readResults[instance].r1 = cpu_load_value(&ctx.testLocations[xAddr], role.cpuLoad1);
-      cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
+  bool didLoad = false;
+  for (int opIndex = 0; opIndex < thread.opCount; opIndex++) {
+    const ThreadOp& op = thread.ops[opIndex];
+    uint addr = location_addr_for(op.location, instance, ctx.config->totalInstances,
+                                  ctx.config->memStride, ctx.config->memOffset,
+                                  ctx.config->permuteLocation);
+    if (op.kind == THREAD_OP_STORE) {
+      cpu_store_value(&ctx.testLocations[addr], op.order, 1);
+    } else if (op.kind == THREAD_OP_LOAD) {
+      uint value = cpu_load_value(&ctx.testLocations[addr], op.order);
+      write_result_slot(&ctx.readResults[instance], op.resultSlot, value);
+      didLoad = true;
     }
-    return;
   }
 
-  if (ctx.roleIndex == 0) {
-    cpu_store_value(&ctx.testLocations[xAddr], role.cpuStore, 1);
-  } else if (ctx.roleIndex == 1) {
-    ctx.readResults[instance].r0 = cpu_load_value(&ctx.testLocations[xAddr], role.cpuLoad1);
-    ctx.readResults[instance].r1 = cpu_load_value(&ctx.testLocations[yAddr], role.cpuLoad2);
-    cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
-  } else if (ctx.roleIndex == 2) {
-    cpu_store_value(&ctx.testLocations[yAddr], role.cpuStore, 1);
-  } else {
-    ctx.readResults[instance].r2 = cpu_load_value(&ctx.testLocations[yAddr], role.cpuLoad1);
-    ctx.readResults[instance].r3 = cpu_load_value(&ctx.testLocations[xAddr], role.cpuLoad2);
+  if (didLoad) {
     cuda::atomic_thread_fence(cuda::memory_order_seq_cst);
   }
 }
 
 void cpu_role_worker(CpuWorkerContext ctx) {
   for (int instance = ctx.workerIndex; instance < ctx.config->totalInstances; instance += ctx.workerCount) {
-    execute_cpu_role(ctx, instance);
+    execute_cpu_thread(ctx, instance);
   }
 }
 
@@ -707,8 +718,7 @@ void set_scratch_locations(uint* scratchLocations, int numBlocks, const StressPa
   }
 }
 
-IterationCounts classify_iteration(const ExperimentConfig& experiment,
-                                   const RunConfig& config,
+IterationCounts classify_iteration(const RunConfig& config,
                                    het_atomic_uint* testLocations,
                                    ReadResults* readResults) {
   IterationCounts counts;
@@ -723,10 +733,22 @@ IterationCounts classify_iteration(const ExperimentConfig& experiment,
     uint r2 = readResults[instance].r2;
     uint r3 = readResults[instance].r3;
 
-    if (experiment.testKind == TEST_SB) {
+    if (config.testKind == TEST_SB) {
       if (x == 0 && y == 0) {
-        counts.na++;
-      } else if (r0 == 0 && r1 == 0) {
+        counts.x0y0++;
+      } else if (x == 0) {
+        counts.x0y1++;
+      } else if (y == 0) {
+        counts.x1y0++;
+      } else {
+        counts.x1y1++;
+      }
+
+      if (x == 0 && y == 0) {
+        continue;
+      }
+
+      if (r0 == 0 && r1 == 0) {
         counts.weak++;
       } else {
         counts.other++;
@@ -734,16 +756,32 @@ IterationCounts classify_iteration(const ExperimentConfig& experiment,
       continue;
     }
 
+    if (x == 0 && y == 0) {
+      counts.x0y0++;
+      continue;
+    }
     if (x == 0) {
-      counts.na++;
-    } else if (r0 == 1 && r1 == 0 && r2 == 1 && r3 == 0) {
+      counts.x0y1++;
+      continue;
+    }
+    if (y == 0) {
+      counts.x1y0++;
+      continue;
+    }
+
+    counts.x1y1++;
+    if (r0 == 1 && r1 == 0 && r2 == 1 && r3 == 0) {
       counts.weak++;
     } else {
       counts.other++;
     }
   }
 
-  counts.total = counts.weak + counts.other;
+  if (config.testKind == TEST_SB) {
+    counts.total = counts.weak + counts.other;
+  } else {
+    counts.total = counts.x1y1;
+  }
   return counts;
 }
 
@@ -819,22 +857,22 @@ int main(int argc, char** argv) {
 
   RunConfig config = {};
   config.testKind = experiment->testKind;
-  config.roleCount = experiment->roleCount;
+  config.threadCount = experiment->threadCount;
   config.totalInstances = stressParams.workgroupSize * stressParams.testingWorkgroups;
   config.memStride = stressParams.memStride;
   config.memOffset = stressParams.memStride;
   config.permuteLocation = testParams.permuteLocation;
   config.barrierSpinLimit = stressParams.barrierSpinLimit;
-  for (int i = 0; i < 4; i++) {
-    config.roles[i] = experiment->roles[i];
+  for (int i = 0; i < kMaxThreads; i++) {
+    config.threads[i] = experiment->threads[i];
   }
 
   int cpuRoleCount = 0;
   int gpuRoleCount = 0;
-  for (int i = 0; i < config.roleCount; i++) {
-    if (config.roles[i].domain == DOMAIN_CPU) {
+  for (int i = 0; i < config.threadCount; i++) {
+    if (config.threads[i].domain == DOMAIN_CPU) {
       cpuRoleCount++;
-    } else if (config.roles[i].domain == DOMAIN_GPU) {
+    } else if (config.threads[i].domain == DOMAIN_GPU) {
       gpuRoleCount++;
     }
   }
@@ -855,7 +893,7 @@ int main(int argc, char** argv) {
   uint* dScratchpad = nullptr;
   uint* dScratchLocations = nullptr;
   uint* hScratchLocations = nullptr;
-  int maxTaskCount = totalInstances * config.roleCount;
+  int maxTaskCount = totalInstances * config.threadCount;
   int maxBlocks = (maxTaskCount + stressParams.workgroupSize - 1) / stressParams.workgroupSize;
   if (maxBlocks <= 0) {
     maxBlocks = 1;
@@ -896,6 +934,7 @@ int main(int argc, char** argv) {
   auto start = std::chrono::high_resolution_clock::now();
   int totalWeak = 0;
   int totalBehaviors = 0;
+  IterationCounts aggregateCounts;
 
   try {
     for (int iteration = 0; iteration < stressParams.testIterations; iteration++) {
@@ -909,7 +948,7 @@ int main(int argc, char** argv) {
       config.gpuPreStressIterations = stressParams.preStressIterations;
       config.gpuPreStressPattern = stressParams.preStressPattern;
 
-      int taskCount = totalInstances * config.roleCount;
+      int taskCount = totalInstances * config.threadCount;
       int blocks = (taskCount + stressParams.workgroupSize - 1) / stressParams.workgroupSize;
       if (blocks <= 0) {
         blocks = 1;
@@ -928,8 +967,8 @@ int main(int argc, char** argv) {
 
       std::vector<std::thread> cpuThreads;
       int scratchIndex = 0;
-      for (int roleIndex = 0; roleIndex < config.roleCount; roleIndex++) {
-        if (config.roles[roleIndex].domain != DOMAIN_CPU) {
+      for (int threadIndex = 0; threadIndex < config.threadCount; threadIndex++) {
+        if (config.threads[threadIndex].domain != DOMAIN_CPU) {
           continue;
         }
         for (int workerIndex = 0; workerIndex < roleWorkerCount; workerIndex++) {
@@ -942,7 +981,7 @@ int main(int argc, char** argv) {
             doCpuPreStress,
             stressParams.cpuPreStressIterations,
             stressParams.cpuPreStressPattern,
-            roleIndex,
+            threadIndex,
             workerIndex,
             roleWorkerCount,
           };
@@ -958,9 +997,16 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaDeviceSynchronize());
       }
 
-      IterationCounts counts = classify_iteration(*experiment, config, hTestLocations, hReadResults);
+      IterationCounts counts = classify_iteration(config, hTestLocations, hReadResults);
       totalWeak += counts.weak;
       totalBehaviors += counts.total;
+      aggregateCounts.weak += counts.weak;
+      aggregateCounts.total += counts.total;
+      aggregateCounts.other += counts.other;
+      aggregateCounts.x0y0 += counts.x0y0;
+      aggregateCounts.x0y1 += counts.x0y1;
+      aggregateCounts.x1y0 += counts.x1y0;
+      aggregateCounts.x1y1 += counts.x1y1;
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -974,6 +1020,12 @@ int main(int argc, char** argv) {
               << " per second\n";
     std::cout << "Total behaviors: " << totalBehaviors << "\n";
     std::cout << "Number of weak behaviors: " << totalWeak << "\n";
+    if (config.testKind == TEST_IRIW) {
+      std::cout << "Final state x=0, y=0: " << aggregateCounts.x0y0 << "\n";
+      std::cout << "Final state x=0, y=1: " << aggregateCounts.x0y1 << "\n";
+      std::cout << "Final state x=1, y=0: " << aggregateCounts.x1y0 << "\n";
+      std::cout << "Final state x=1, y=1: " << aggregateCounts.x1y1 << "\n";
+    }
   } catch (...) {
     stopStress = true;
     for (auto& thread : stressThreads) {
