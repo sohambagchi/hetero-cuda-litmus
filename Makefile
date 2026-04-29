@@ -21,7 +21,7 @@ TESTS       ?= all-tests.txt
 MEM_BACKEND ?= HOSTALLOC
 TUNE_SCRIPT  = ./tune.sh
 NVCC        ?= /usr/local/cuda-12.4/bin/nvcc
-ARCH        ?= sm_90
+ARCH        ?= sm_87
 HET_DEBUG   ?= 0
 
 TARGET_DIR  = target
@@ -203,7 +203,7 @@ help:
 	@echo "  TESTS=<file>        Tuning list file (default: all-tests.txt)"
 	@echo "  MEM_BACKEND=<HOSTALLOC|MANAGED|MALLOC>  (default: HOSTALLOC)"
 	@echo "  NVCC=<path>         CUDA compiler (default: /usr/local/cuda-12.4/bin/nvcc)"
-	@echo "  ARCH=<arch>         GPU architecture (default: sm_90)"
+	@echo "  ARCH=<arch>         GPU architecture (default: sm_87)"
 	@echo "  HET_DEBUG=1         Compile runners with extra [HET_DEBUG] diagnostics"
 	@echo "  -jN                 Compile up to N binaries in parallel"
 	@echo ""

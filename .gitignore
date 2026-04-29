@@ -3,6 +3,8 @@ target/
 results/
 full-matrix-results/
 
+.venv/
+
 # Generated parameter files
 params.txt
 
